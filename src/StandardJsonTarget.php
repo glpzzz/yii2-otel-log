@@ -18,8 +18,10 @@ use yii\web\Request as WebRequest;
  *
  * Extends {@see FileTarget} for its file handling, rotation and flock-safe append; only
  * {@see formatMessage()} is replaced. Native arrays passed to `Yii::info()/warning()/error()`
- * land in a nested `context` object instead of being flattened; a `serialize([...])` payload
- * (the pattern used across older call sites) is transparently unpacked too.
+ * land in a nested `context` object instead of being flattened; a legacy `serialize([...])`
+ * payload is transparently unpacked too. A Throwable -- passed directly or nested in the
+ * context array under any key -- is hoisted onto `error.kind` / `error.message` /
+ * `error.stack_trace`.
  *
  * @see https://opentelemetry.io/docs/specs/semconv/
  */
@@ -85,8 +87,6 @@ class StandardJsonTarget extends FileTarget
     {
         [$text, $level, $category, $timestamp] = $message;
 
-        $throwable = $text instanceof Throwable ? $text : null;
-
         $entry = [
             'timestamp' => Env::isoTimestamp((float) $timestamp),
             'log.level' => Env::mapLevel((int) $level),
@@ -96,7 +96,8 @@ class StandardJsonTarget extends FileTarget
             'account.id' => $this->resolveId($this->accountIdResolver),
             'trace.id' => Tracker::id(),
             'message' => '',
-            'error.kind' => $throwable !== null ? $throwable::class : ((string) $category !== '' ? (string) $category : null),
+            'error.kind' => (string) $category !== '' ? (string) $category : null,
+            'error.message' => null,
             'error.stack_trace' => null,
             'http.request.ip' => $this->requestIp(),
             'user.id' => $this->resolveId($this->userIdResolver),
@@ -105,14 +106,31 @@ class StandardJsonTarget extends FileTarget
 
         $context = [];
 
-        if ($throwable !== null) {
-            $entry['message'] = $throwable->getMessage();
-            $entry['error.stack_trace'] = (string) $throwable;
-            if ($throwable->getPrevious() !== null) {
-                $context['exception.previous'] = $throwable->getPrevious()::class;
-            }
+        // An exception reaches the target either as the payload itself
+        // (Yii::error($e, ...)) or nested in the context array under any key
+        // (Yii::error(['message' => ..., 'exception' => $e], ...)).
+        if ($text instanceof Throwable) {
+            $exception = $text;
         } else {
             $context = $this->interpretPayload($text, $entry['message']);
+            $exception = $this->hoistException($context);
+        }
+
+        if ($exception !== null) {
+            // exception class takes over error.kind; keep the log category (usually
+            // __METHOD__) as the origin under context.code.function
+            if ((string) $category !== '') {
+                $context['code.function'] = (string) $category;
+            }
+            $entry['error.kind'] = $exception::class;
+            $entry['error.message'] = $exception->getMessage();
+            $entry['error.stack_trace'] = (string) $exception;
+            if ($exception->getPrevious() !== null) {
+                $context['exception.previous'] = $exception->getPrevious()::class;
+            }
+            if ($entry['message'] === '') {
+                $entry['message'] = $exception->getMessage();
+            }
         }
 
         if ($this->includeRequestContext) {
@@ -134,6 +152,9 @@ class StandardJsonTarget extends FileTarget
         $context = $this->mask($this->truncate($context));
         $entry['context'] = $context === [] ? new stdClass() : $context;
 
+        if ($entry['error.message'] === null) {
+            unset($entry['error.message']);
+        }
         if ($entry['error.stack_trace'] === null) {
             unset($entry['error.stack_trace']);
         }
@@ -184,6 +205,25 @@ class StandardJsonTarget extends FileTarget
         }
 
         return $payload;
+    }
+
+    /**
+     * Pull the first Throwable out of the context array (by any key) so its trace and
+     * message can be hoisted onto the dedicated `error.*` keys.
+     *
+     * @param array<array-key, mixed> $context
+     */
+    private function hoistException(array &$context): ?Throwable
+    {
+        foreach ($context as $key => $value) {
+            if ($value instanceof Throwable) {
+                unset($context[$key]);
+
+                return $value;
+            }
+        }
+
+        return null;
     }
 
     private function resolveId(?Closure $resolver): int|string|null

@@ -95,10 +95,39 @@ final class StandardJsonTargetTest extends TestCase
         ]]);
 
         self::assertSame('boom', $entry['message']);
+        self::assertSame('boom', $entry['error.message']);
         self::assertSame(RuntimeException::class, $entry['error.kind']);
         self::assertStringContainsString('RuntimeException', $entry['error.stack_trace']);
         self::assertStringContainsString('\n', json_encode($entry['error.stack_trace']));
         self::assertSame(['/app/x.php:10'], $entry['context']['code.stacktrace']);
+    }
+
+    public function testExceptionNestedInContextIsHoisted(): void
+    {
+        $exception = new RuntimeException('inner failure');
+        $entry = $this->decode($this->target(), [
+            ['message' => 'Failed to do the thing', 'user' => 7, 'exception' => $exception],
+            Logger::LEVEL_ERROR,
+            'common\\jobs\\DoThing::execute',
+            1757252712.5,
+        ]);
+
+        self::assertSame('Failed to do the thing', $entry['message']);
+        self::assertSame('inner failure', $entry['error.message']);
+        self::assertSame(RuntimeException::class, $entry['error.kind']);
+        self::assertStringContainsString('RuntimeException', $entry['error.stack_trace']);
+        self::assertSame(7, $entry['context']['user']);
+        self::assertArrayNotHasKey('exception', $entry['context']);
+        self::assertSame('common\\jobs\\DoThing::execute', $entry['context']['code.function']);
+    }
+
+    public function testNoExceptionKeysWhenNoException(): void
+    {
+        $entry = $this->decode($this->target(), ['plain', Logger::LEVEL_INFO, 'app\\X', 1757252712.5]);
+
+        self::assertArrayNotHasKey('error.message', $entry);
+        self::assertArrayNotHasKey('error.stack_trace', $entry);
+        self::assertSame('app\\X', $entry['error.kind']);
     }
 
     public function testRequestContextAndMaskingUnderWebApp(): void

@@ -79,14 +79,18 @@ One JSON object per line. Dot-notation keys are literal (not nested), except `co
 | `trace.id` | `TRACKING_REQUEST_UUID` |
 | `message` | the text message (or the `message` key of an array payload) |
 | `error.kind` | exception class, else the log category (`__METHOD__`) |
+| `error.message` | exception message; absent when no exception |
 | `error.stack_trace` | full exception trace as one JSON string (`\n`-escaped); absent when no exception |
 | `http.request.ip` | client IP for web requests, `null` on console |
 | `user.id` | `userIdResolver()`, `null` for guests/console |
 | `context` | nested object: developer-supplied array data, plus (web) `http.request.method/url/query/body`, `http.user_agent`, `http.referer` |
 
-Array payloads passed to `Yii::info()/warning()/error()` are unpacked into `context`; a
-`serialize([...])` string payload is unpacked too. Keys named like secrets
-(`password`, `token`, `secret`, `_csrf`, …) are masked to `***` anywhere in `context`.
+Array payloads passed to `Yii::info()/warning()/error()` are unpacked into `context`; a legacy
+`serialize([...])` string payload is unpacked too. A Throwable — passed directly or held under
+any key of the array (e.g. `['message' => 'failed', 'exception' => $e]`) — is lifted onto
+`error.kind` / `error.message` / `error.stack_trace`, and the log category is kept as
+`context.code.function`. Keys named like secrets (`password`, `token`, `secret`, `_csrf`, …)
+are masked to `***` anywhere in `context`.
 
 ## Environment variables
 
