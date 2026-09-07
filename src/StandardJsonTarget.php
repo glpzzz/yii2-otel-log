@@ -22,10 +22,10 @@ use yii\web\Request as WebRequest;
  * payload is transparently unpacked too.
  *
  * `error.kind` is always the log category. The exception fields are filled only when the call
- * carried an exception: pass its detail as plain strings —
- * `['message' => 'failed', 'error.message' => $e->getMessage(), 'error.stack_trace' => (string) $e]`
- * — or pass the Throwable as the whole payload (`Yii::error($e, $category)`), in which case
- * `message` equals `$e->getMessage()`.
+ * carried an exception: pass its detail as plain strings, nested --
+ * `['message' => 'failed', 'error' => ['message' => $e->getMessage(), 'stack_trace' => (string) $e]]`
+ * -- (flat `error.message` / `error.stack_trace` keys work too), or pass the Throwable as the
+ * whole payload (`Yii::error($e, $category)`), in which case `message` equals `$e->getMessage()`.
  *
  * @see https://opentelemetry.io/docs/specs/semconv/
  */
@@ -198,24 +198,37 @@ class StandardJsonTarget extends FileTarget
     }
 
     /**
-     * Move the exception-specific `error.message` / `error.stack_trace` keys out of the
-     * context array and onto the top-level `error.*` fields (call sites pass them as plain
-     * strings, e.g. `'error.stack_trace' => (string) $e`). `error.kind` stays the log
-     * category and is never taken from the payload. A stray Throwable object under any key
-     * is reduced too, as a safety net.
+     * Move the exception-specific message/stack trace out of the context array and onto the
+     * top-level `error.message` / `error.stack_trace` fields. Call sites pass plain strings,
+     * either nested --
+     * `'error' => ['message' => $e->getMessage(), 'stack_trace' => (string) $e]` -- or as the
+     * flat dotted keys `'error.message'` / `'error.stack_trace'`. `error.kind` stays the log
+     * category and is never taken from the payload. A stray Throwable object under any key is
+     * reduced too, as a safety net.
      *
      * @param array<array-key, mixed> $context
      * @param array<string, mixed> $entry
      */
     private function promoteErrorFields(array &$context, array &$entry): void
     {
+        $set = static function (string $field, mixed $value) use (&$entry): void {
+            if (is_scalar($value) && (string) $value !== '') {
+                $entry[$field] = (string) $value;
+            }
+        };
+
+        if (isset($context['error']) && is_array($context['error'])) {
+            $error = $context['error'];
+            unset($context['error']);
+            $set('error.message', $error['message'] ?? null);
+            $set('error.stack_trace', $error['stack_trace'] ?? null);
+        }
+
         foreach (['error.message', 'error.stack_trace'] as $field) {
             if (array_key_exists($field, $context)) {
                 $value = $context[$field];
                 unset($context[$field]);
-                if (is_scalar($value) && (string) $value !== '') {
-                    $entry[$field] = (string) $value;
-                }
+                $set($field, $value);
             }
         }
 

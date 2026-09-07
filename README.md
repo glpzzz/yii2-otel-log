@@ -86,22 +86,26 @@ One JSON object per line. Dot-notation keys are literal (not nested), except `co
 | `context` | nested object: developer-supplied array data, plus (web) `http.request.method/url/query/body`, `http.user_agent`, `http.referer` |
 
 Array payloads passed to `Yii::info()/warning()/error()` are unpacked into `context`; a legacy
-`serialize([...])` string payload is unpacked too. Pass exception detail as plain strings —
-`error.message` and `error.stack_trace` keys are promoted onto the top-level OTel fields:
+`serialize([...])` string payload is unpacked too. Pass exception detail as plain strings under
+a nested `error` key — `error.message` / `error.stack_trace` are promoted onto the top-level
+OTel fields:
 
 ```php
 Yii::error([
     'message' => 'Failed to resize image',
-    'error.message' => $e->getMessage(),
-    'error.stack_trace' => (string) $e,
+    'error' => [
+        'message' => $e->getMessage(),
+        'stack_trace' => (string) $e,
+    ],
     'image' => $path,
 ], __METHOD__);
 ```
 
-`error.kind` is always the log category — never taken from the payload. A Throwable passed as
-the whole payload (`Yii::error($e, $category)`) is also handled, and then `message` equals
-`$e->getMessage()`. Keys named like secrets (`password`, `token`, `secret`, `_csrf`, …) are
-masked to `***` anywhere in `context`.
+The flat `'error.message'` / `'error.stack_trace'` keys are accepted too. `error.kind` is
+always the log category — never taken from the payload. A Throwable passed as the whole payload
+(`Yii::error($e, $category)`) is also handled, and then `message` equals `$e->getMessage()`.
+Keys named like secrets (`password`, `token`, `secret`, `_csrf`, …) are masked to `***`
+anywhere in `context`.
 
 ## Environment variables
 

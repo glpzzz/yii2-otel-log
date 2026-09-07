@@ -102,15 +102,17 @@ final class StandardJsonTargetTest extends TestCase
         self::assertSame(['/app/x.php:10'], $entry['context']['code.stacktrace']);
     }
 
-    public function testErrorFieldsPromotedFromStringKeys(): void
+    public function testErrorFieldsPromotedFromNestedKey(): void
     {
         $exception = new RuntimeException('inner failure');
         $entry = $this->decode($this->target(), [
             [
                 'message' => 'Failed to do the thing',
                 'user' => 7,
-                'error.message' => $exception->getMessage(),
-                'error.stack_trace' => (string) $exception,
+                'error' => [
+                    'message' => $exception->getMessage(),
+                    'stack_trace' => (string) $exception,
+                ],
             ],
             Logger::LEVEL_ERROR,
             'common\\jobs\\DoThing::execute',
@@ -122,8 +124,21 @@ final class StandardJsonTargetTest extends TestCase
         self::assertStringContainsString('RuntimeException', $entry['error.stack_trace']);
         self::assertSame('common\\jobs\\DoThing::execute', $entry['error.kind'], 'error.kind = category');
         self::assertSame(7, $entry['context']['user']);
+        self::assertArrayNotHasKey('error', $entry['context']);
+    }
+
+    public function testErrorFieldsPromotedFromFlatDottedKeys(): void
+    {
+        $entry = $this->decode($this->target(), [
+            ['message' => 'boom', 'error.message' => 'x', 'error.stack_trace' => 'trace here'],
+            Logger::LEVEL_ERROR,
+            'app\\Y',
+            1757252712.5,
+        ]);
+
+        self::assertSame('x', $entry['error.message']);
+        self::assertSame('trace here', $entry['error.stack_trace']);
         self::assertArrayNotHasKey('error.message', $entry['context']);
-        self::assertArrayNotHasKey('error.stack_trace', $entry['context']);
     }
 
     public function testStrayExceptionObjectIsStillHandled(): void
