@@ -96,7 +96,7 @@ final class StandardJsonTargetTest extends TestCase
 
         self::assertSame('boom', $entry['message']);
         self::assertSame('boom', $entry['error.message']);
-        self::assertSame(RuntimeException::class, $entry['error.kind']);
+        self::assertSame('app', $entry['error.kind'], 'error.kind is always the category');
         self::assertStringContainsString('RuntimeException', $entry['error.stack_trace']);
         self::assertStringContainsString('\n', json_encode($entry['error.stack_trace']));
         self::assertSame(['/app/x.php:10'], $entry['context']['code.stacktrace']);
@@ -120,7 +120,7 @@ final class StandardJsonTargetTest extends TestCase
         self::assertSame('Failed to do the thing', $entry['message']);
         self::assertSame('inner failure', $entry['error.message']);
         self::assertStringContainsString('RuntimeException', $entry['error.stack_trace']);
-        self::assertSame('common\\jobs\\DoThing::execute', $entry['error.kind']);
+        self::assertSame('common\\jobs\\DoThing::execute', $entry['error.kind'], 'error.kind = category');
         self::assertSame(7, $entry['context']['user']);
         self::assertArrayNotHasKey('error.message', $entry['context']);
         self::assertArrayNotHasKey('error.stack_trace', $entry['context']);
@@ -136,7 +136,7 @@ final class StandardJsonTargetTest extends TestCase
         ]);
 
         self::assertSame('leaked object', $entry['error.message']);
-        self::assertSame(RuntimeException::class, $entry['error.kind']);
+        self::assertSame('app\\X', $entry['error.kind'], 'error.kind stays the category');
         self::assertArrayNotHasKey('boom', $entry['context']);
     }
 

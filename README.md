@@ -78,9 +78,9 @@ One JSON object per line. Dot-notation keys are literal (not nested), except `co
 | `account.id` | `accountIdResolver()` — tenant/client scope, nullable |
 | `trace.id` | `TRACKING_REQUEST_UUID` |
 | `message` | the text message (or the `message` key of an array payload) |
-| `error.kind` | exception class, else the log category (`__METHOD__`) |
-| `error.message` | exception message; absent when no exception |
-| `error.stack_trace` | full exception trace as one JSON string (`\n`-escaped); absent when no exception |
+| `error.kind` | the log category (2nd arg to `Yii::error()` etc., usually `__METHOD__`) — always, exception or not |
+| `error.message` | exception message; absent when the call carried no exception |
+| `error.stack_trace` | full exception trace as one JSON string (`\n`-escaped); absent when the call carried no exception |
 | `http.request.ip` | client IP for web requests, `null` on console |
 | `user.id` | `userIdResolver()`, `null` for guests/console |
 | `context` | nested object: developer-supplied array data, plus (web) `http.request.method/url/query/body`, `http.user_agent`, `http.referer` |
@@ -98,9 +98,10 @@ Yii::error([
 ], __METHOD__);
 ```
 
-`error.kind` stays the log category unless you set it explicitly. A Throwable passed as the
-payload itself (`Yii::error($e, …)`) is also handled. Keys named like secrets (`password`,
-`token`, `secret`, `_csrf`, …) are masked to `***` anywhere in `context`.
+`error.kind` is always the log category — never taken from the payload. A Throwable passed as
+the whole payload (`Yii::error($e, $category)`) is also handled, and then `message` equals
+`$e->getMessage()`. Keys named like secrets (`password`, `token`, `secret`, `_csrf`, …) are
+masked to `***` anywhere in `context`.
 
 ## Environment variables
 
