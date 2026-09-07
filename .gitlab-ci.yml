@@ -1,0 +1,28 @@
+image: yiisoftware/yii2-php:8.4-apache
+
+stages:
+  - test
+
+variables:
+  COMPOSER_ALLOW_SUPERUSER: "1"
+
+.php:
+  stage: test
+  before_script:
+    - curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
+    - composer install --no-interaction --no-progress --prefer-dist
+
+phpunit:
+  extends: .php
+  script:
+    - vendor/bin/phpunit
+
+phpstan:
+  extends: .php
+  script:
+    - vendor/bin/phpstan analyse --no-progress
+
+phpcs:
+  extends: .php
+  script:
+    - vendor/bin/phpcs --standard=vendor/yiisoft/yii2-coding-standards/Yii2 src
