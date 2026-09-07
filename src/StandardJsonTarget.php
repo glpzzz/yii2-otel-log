@@ -19,9 +19,11 @@ use yii\web\Request as WebRequest;
  * Extends {@see FileTarget} for its file handling, rotation and flock-safe append; only
  * {@see formatMessage()} is replaced. Native arrays passed to `Yii::info()/warning()/error()`
  * land in a nested `context` object instead of being flattened; a legacy `serialize([...])`
- * payload is transparently unpacked too. A Throwable -- passed directly or nested in the
- * context array under any key -- is hoisted onto `error.kind` / `error.message` /
- * `error.stack_trace`.
+ * payload is transparently unpacked too. `error.message` / `error.stack_trace` / `error.kind`
+ * keys in the array are promoted onto the top-level OTel error fields (call sites pass the
+ * exception detail as plain strings, e.g.
+ * `['message' => 'failed', 'error.message' => $e->getMessage(), 'error.stack_trace' => (string) $e]`);
+ * a Throwable passed as the payload itself is also supported.
  *
  * @see https://opentelemetry.io/docs/specs/semconv/
  */
@@ -106,31 +108,17 @@ class StandardJsonTarget extends FileTarget
 
         $context = [];
 
-        // An exception reaches the target either as the payload itself
-        // (Yii::error($e, ...)) or nested in the context array under any key
-        // (Yii::error(['message' => ..., 'exception' => $e], ...)).
         if ($text instanceof Throwable) {
-            $exception = $text;
+            // Yii::error($e, ...) -- derive the error.* fields from the object.
+            $entry['error.kind'] = $text::class;
+            $entry['error.message'] = $text->getMessage();
+            $entry['error.stack_trace'] = (string) $text;
+            $entry['message'] = $text->getMessage();
         } else {
             $context = $this->interpretPayload($text, $entry['message']);
-            $exception = $this->hoistException($context);
-        }
-
-        if ($exception !== null) {
-            // exception class takes over error.kind; keep the log category (usually
-            // __METHOD__) as the origin under context.code.function
-            if ((string) $category !== '') {
-                $context['code.function'] = (string) $category;
-            }
-            $entry['error.kind'] = $exception::class;
-            $entry['error.message'] = $exception->getMessage();
-            $entry['error.stack_trace'] = (string) $exception;
-            if ($exception->getPrevious() !== null) {
-                $context['exception.previous'] = $exception->getPrevious()::class;
-            }
-            if ($entry['message'] === '') {
-                $entry['message'] = $exception->getMessage();
-            }
+            // Call sites pass the exception detail as plain strings under these keys
+            // (never the live object): promote them onto the OTel error.* fields.
+            $this->promoteErrorFields($context, $entry, (string) $category);
         }
 
         if ($this->includeRequestContext) {
@@ -208,22 +196,38 @@ class StandardJsonTarget extends FileTarget
     }
 
     /**
-     * Pull the first Throwable out of the context array (by any key) so its trace and
-     * message can be hoisted onto the dedicated `error.*` keys.
+     * Move `error.message` / `error.stack_trace` / `error.kind` out of the context array and
+     * onto the top-level `error.*` fields (call sites pass these as plain strings). A stray
+     * Throwable object under any key is handled too, as a safety net.
      *
      * @param array<array-key, mixed> $context
+     * @param array<string, mixed> $entry
      */
-    private function hoistException(array &$context): ?Throwable
+    private function promoteErrorFields(array &$context, array &$entry, string $category): void
     {
-        foreach ($context as $key => $value) {
-            if ($value instanceof Throwable) {
-                unset($context[$key]);
-
-                return $value;
+        foreach (['error.message', 'error.stack_trace', 'error.kind'] as $field) {
+            if (array_key_exists($field, $context)) {
+                $value = $context[$field];
+                unset($context[$field]);
+                if (is_scalar($value) && (string) $value !== '') {
+                    $entry[$field] = (string) $value;
+                }
             }
         }
 
-        return null;
+        foreach ($context as $key => $value) {
+            if ($value instanceof Throwable) {
+                unset($context[$key]);
+                $entry['error.kind'] = $value::class;
+                $entry['error.message'] = $value->getMessage();
+                $entry['error.stack_trace'] = (string) $value;
+                break;
+            }
+        }
+
+        if ($entry['message'] === '' && $entry['error.message'] !== null) {
+            $entry['message'] = (string) $entry['error.message'];
+        }
     }
 
     private function resolveId(?Closure $resolver): int|string|null

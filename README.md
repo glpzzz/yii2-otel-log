@@ -86,11 +86,21 @@ One JSON object per line. Dot-notation keys are literal (not nested), except `co
 | `context` | nested object: developer-supplied array data, plus (web) `http.request.method/url/query/body`, `http.user_agent`, `http.referer` |
 
 Array payloads passed to `Yii::info()/warning()/error()` are unpacked into `context`; a legacy
-`serialize([...])` string payload is unpacked too. A Throwable — passed directly or held under
-any key of the array (e.g. `['message' => 'failed', 'exception' => $e]`) — is lifted onto
-`error.kind` / `error.message` / `error.stack_trace`, and the log category is kept as
-`context.code.function`. Keys named like secrets (`password`, `token`, `secret`, `_csrf`, …)
-are masked to `***` anywhere in `context`.
+`serialize([...])` string payload is unpacked too. Pass exception detail as plain strings —
+`error.message` and `error.stack_trace` keys are promoted onto the top-level OTel fields:
+
+```php
+Yii::error([
+    'message' => 'Failed to resize image',
+    'error.message' => $e->getMessage(),
+    'error.stack_trace' => (string) $e,
+    'image' => $path,
+], __METHOD__);
+```
+
+`error.kind` stays the log category unless you set it explicitly. A Throwable passed as the
+payload itself (`Yii::error($e, …)`) is also handled. Keys named like secrets (`password`,
+`token`, `secret`, `_csrf`, …) are masked to `***` anywhere in `context`.
 
 ## Environment variables
 

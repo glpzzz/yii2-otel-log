@@ -102,11 +102,16 @@ final class StandardJsonTargetTest extends TestCase
         self::assertSame(['/app/x.php:10'], $entry['context']['code.stacktrace']);
     }
 
-    public function testExceptionNestedInContextIsHoisted(): void
+    public function testErrorFieldsPromotedFromStringKeys(): void
     {
         $exception = new RuntimeException('inner failure');
         $entry = $this->decode($this->target(), [
-            ['message' => 'Failed to do the thing', 'user' => 7, 'exception' => $exception],
+            [
+                'message' => 'Failed to do the thing',
+                'user' => 7,
+                'error.message' => $exception->getMessage(),
+                'error.stack_trace' => (string) $exception,
+            ],
             Logger::LEVEL_ERROR,
             'common\\jobs\\DoThing::execute',
             1757252712.5,
@@ -114,11 +119,25 @@ final class StandardJsonTargetTest extends TestCase
 
         self::assertSame('Failed to do the thing', $entry['message']);
         self::assertSame('inner failure', $entry['error.message']);
-        self::assertSame(RuntimeException::class, $entry['error.kind']);
         self::assertStringContainsString('RuntimeException', $entry['error.stack_trace']);
+        self::assertSame('common\\jobs\\DoThing::execute', $entry['error.kind']);
         self::assertSame(7, $entry['context']['user']);
-        self::assertArrayNotHasKey('exception', $entry['context']);
-        self::assertSame('common\\jobs\\DoThing::execute', $entry['context']['code.function']);
+        self::assertArrayNotHasKey('error.message', $entry['context']);
+        self::assertArrayNotHasKey('error.stack_trace', $entry['context']);
+    }
+
+    public function testStrayExceptionObjectIsStillHandled(): void
+    {
+        $entry = $this->decode($this->target(), [
+            ['message' => 'oops', 'boom' => new RuntimeException('leaked object')],
+            Logger::LEVEL_ERROR,
+            'app\\X',
+            1757252712.5,
+        ]);
+
+        self::assertSame('leaked object', $entry['error.message']);
+        self::assertSame(RuntimeException::class, $entry['error.kind']);
+        self::assertArrayNotHasKey('boom', $entry['context']);
     }
 
     public function testNoExceptionKeysWhenNoException(): void
