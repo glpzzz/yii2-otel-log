@@ -13,21 +13,27 @@ use yii\log\FileTarget;
 use yii\web\Request as WebRequest;
 
 /**
- * A Yii2 log target that writes one JSON object per line (NDJSON) using OpenTelemetry-style
- * dot-notation keys, ready for a log shipper (Vector / Fluent Bit) to tail into OpenObserve.
+ * A Yii2 log target that writes one JSON object per line (NDJSON) using Elastic Common Schema
+ * (ECS) field names, ready for a log shipper (Vector / Fluent Bit) to tail into OpenObserve,
+ * Elasticsearch, Loki, etc.
  *
  * Extends {@see FileTarget} for its file handling, rotation and flock-safe append; only
- * {@see formatMessage()} is replaced. Native arrays passed to `Yii::info()/warning()/error()`
- * land in a nested `context` object instead of being flattened; a legacy `serialize([...])`
- * payload is transparently unpacked too.
+ * {@see formatMessage()} is replaced.
  *
- * `error.kind` is always the log category. The exception fields are filled only when the call
- * carried an exception: pass its detail as plain strings, nested --
+ * The well-known fields are promoted to the top level with ECS names -- `@timestamp`,
+ * `log.level`, `log.logger` (the Yii log category), `message`, `service.*`, `trace.id`,
+ * `error.message`, `error.stack_trace`, `client.ip`, `http.request.*`, `url.*`,
+ * `user_agent.original`, `user.*`. Whatever the caller passed to
+ * `Yii::info()/warning()/error()` as an array -- or a legacy `serialize([...])` blob -- lands
+ * untouched in a nested `context` object.
+ *
+ * `error.*` is filled only when the call carried an exception: pass its detail as plain
+ * strings, nested --
  * `['message' => 'failed', 'error' => ['message' => $e->getMessage(), 'stack_trace' => (string) $e]]`
  * -- (flat `error.message` / `error.stack_trace` keys work too), or pass the Throwable as the
  * whole payload (`Yii::error($e, $category)`), in which case `message` equals `$e->getMessage()`.
  *
- * @see https://opentelemetry.io/docs/specs/semconv/
+ * @see https://www.elastic.co/guide/en/ecs/current/index.html
  */
 class StandardJsonTarget extends FileTarget
 {
@@ -38,28 +44,35 @@ class StandardJsonTarget extends FileTarget
     public string $serviceName = '';
 
     /**
-     * Resolver for `account.id` (tenant/client scope). `fn(): int|string|null`.
-     * Defaults to the logged-in user id (or null) when not set.
+     * Resolver for the `user.*` fields. `fn(): array|null` returning any of:
+     *   `['id' => int|string, 'name' => string, 'full_name' => string, 'roles' => list<string>|string]`
+     * mapped to `user.id` / `user.name` / `user.full_name` / `user.roles`. Missing keys are
+     * omitted; a scalar `roles` is wrapped to a single-element list. Defaults to
+     * `['id' => <logged-in user id>]` (or `[]` for a guest / no `user` component).
      */
-    public ?Closure $accountIdResolver = null;
+    public ?Closure $userResolver = null;
 
     /**
-     * Resolver for `user.id`. `fn(): int|string|null`.
-     * Defaults to the logged-in user id (or null) when not set.
+     * Merge request metadata (`client.ip`, `http.request.method`, `url.full`, `url.path`,
+     * `url.query`, `user_agent.original`, `http.request.referrer`) at the top level.
      */
-    public ?Closure $userIdResolver = null;
-
-    /** Merge method/url/query/body/user-agent/referer of the current web request into `context`. */
     public bool $includeRequestContext = true;
 
-    /** Recursion cap for `context` nesting. */
+    /**
+     * Include the request body under `http.request.body.content` (masked/truncated first).
+     * Ignored when {@see $includeRequestContext} is false.
+     */
+    public bool $includeRequestBody = true;
+
+    /** Recursion cap for the nested `context` payload and the request body. */
     public int $maxDepth = 8;
 
-    /** Per-array element cap for `context`. */
+    /** Per-array element cap for the nested `context` payload and the request body. */
     public int $maxItems = 100;
 
     /**
-     * Keys whose values are replaced with `***` anywhere in `context` (case-insensitive).
+     * Keys whose values are replaced with `***` anywhere in `context` or the request body
+     * (case-insensitive).
      *
      * @var list<string>
      */
@@ -92,27 +105,27 @@ class StandardJsonTarget extends FileTarget
         [$text, $level, $category, $timestamp] = $message;
 
         $entry = [
-            'timestamp' => Env::isoTimestamp((float) $timestamp),
+            '@timestamp' => Env::isoTimestamp((float) $timestamp),
             'log.level' => Env::mapLevel((int) $level),
+            'log.logger' => (string) $category !== '' ? (string) $category : null,
             'service.name' => $this->serviceName,
             'service.version' => Env::serviceVersion(),
             'service.environment' => Env::serviceEnvironment(),
-            'account.id' => $this->resolveId($this->accountIdResolver),
             'trace.id' => Tracker::id(),
             'message' => '',
-            'error.kind' => (string) $category !== '' ? (string) $category : null,
             'error.message' => null,
             'error.stack_trace' => null,
-            'http.request.ip' => $this->requestIp(),
-            'user.id' => $this->resolveId($this->userIdResolver),
-            'context' => new stdClass(),
         ];
+
+        $entry += $this->userFields();
+
+        if ($this->includeRequestContext) {
+            $entry += $this->requestFields();
+        }
 
         $context = [];
 
-        // error.kind is always the log category. The exception-specific fields
-        // (error.message / error.stack_trace) are filled only when the call carried
-        // an exception.
+        // error.* is filled only when the call carried an exception.
         if ($text instanceof Throwable) {
             // Yii::error($e, $category) -- the whole payload is the exception.
             $entry['message'] = $text->getMessage();
@@ -123,10 +136,6 @@ class StandardJsonTarget extends FileTarget
             $this->promoteErrorFields($context, $entry);
         }
 
-        if ($this->includeRequestContext) {
-            $context = array_merge($this->requestContext(), $context);
-        }
-
         if (!empty($message[4]) && in_array($entry['log.level'], ['ERROR', 'WARN'], true)) {
             $frames = [];
             foreach ($message[4] as $frame) {
@@ -135,13 +144,16 @@ class StandardJsonTarget extends FileTarget
                 }
             }
             if ($frames !== []) {
-                $context['code.stacktrace'] = $frames;
+                $entry['code.stacktrace'] = $frames;
             }
         }
 
         $context = $this->mask($this->truncate($context));
         $entry['context'] = $context === [] ? new stdClass() : $context;
 
+        if ($entry['log.logger'] === null) {
+            unset($entry['log.logger']);
+        }
         if ($entry['error.message'] === null) {
             unset($entry['error.message']);
         }
@@ -155,7 +167,7 @@ class StandardJsonTarget extends FileTarget
 
         if (!is_string($json)) {
             $json = json_encode([
-                'timestamp' => $entry['timestamp'],
+                '@timestamp' => $entry['@timestamp'],
                 'log.level' => 'ERROR',
                 'service.name' => $entry['service.name'],
                 'trace.id' => $entry['trace.id'],
@@ -202,7 +214,7 @@ class StandardJsonTarget extends FileTarget
      * top-level `error.message` / `error.stack_trace` fields. Call sites pass plain strings,
      * either nested --
      * `'error' => ['message' => $e->getMessage(), 'stack_trace' => (string) $e]` -- or as the
-     * flat dotted keys `'error.message'` / `'error.stack_trace'`. `error.kind` stays the log
+     * flat dotted keys `'error.message'` / `'error.stack_trace'`. `log.logger` stays the log
      * category and is never taken from the payload. A stray Throwable object under any key is
      * reduced too, as a safety net.
      *
@@ -242,53 +254,75 @@ class StandardJsonTarget extends FileTarget
         }
     }
 
-    private function resolveId(?Closure $resolver): int|string|null
+    /**
+     * Resolve the `user.*` fields from {@see $userResolver} (or the default: the logged-in id).
+     *
+     * @return array<string, mixed>
+     */
+    private function userFields(): array
     {
         try {
-            $value = $resolver !== null ? $resolver() : $this->defaultUserId();
+            $data = $this->userResolver !== null ? ($this->userResolver)() : $this->defaultUser();
         } catch (Throwable) {
-            return null;
+            return [];
         }
 
-        if (is_int($value) || $value === null) {
-            return $value;
+        if (!is_array($data)) {
+            return [];
         }
 
-        return is_scalar($value) ? (string) $value : null;
+        $out = [];
+
+        if (isset($data['id']) && is_scalar($data['id'])) {
+            $out['user.id'] = is_int($data['id']) ? $data['id'] : (string) $data['id'];
+        }
+
+        foreach (['name' => 'user.name', 'full_name' => 'user.full_name'] as $key => $field) {
+            if (isset($data[$key]) && is_scalar($data[$key]) && (string) $data[$key] !== '') {
+                $out[$field] = (string) $data[$key];
+            }
+        }
+
+        if (isset($data['roles'])) {
+            $roles = is_array($data['roles']) ? $data['roles'] : [$data['roles']];
+            $roles = array_values(array_filter(
+                array_map(static fn ($role) => is_scalar($role) ? (string) $role : null, $roles),
+                static fn (?string $role) => $role !== null && $role !== '',
+            ));
+            if ($roles !== []) {
+                $out['user.roles'] = $roles;
+            }
+        }
+
+        return $out;
     }
 
-    private function defaultUserId(): int|string|null
+    private function defaultUser(): array
     {
         $app = Yii::$app ?? null;
         if ($app === null || !$app->has('user', true)) {
-            return null;
+            return [];
         }
 
         try {
             $user = $app->get('user');
+            if ($user->getIsGuest()) {
+                return [];
+            }
+            $id = $user->getId();
 
-            return $user->getIsGuest() ? null : $user->getId();
+            return $id === null ? [] : ['id' => $id];
         } catch (Throwable) {
-            return null;
+            return [];
         }
-    }
-
-    private function requestIp(): ?string
-    {
-        $app = Yii::$app ?? null;
-        if ($app === null) {
-            return null;
-        }
-
-        $request = $app->getRequest();
-
-        return $request instanceof WebRequest ? $request->getUserIP() : null;
     }
 
     /**
+     * ECS request metadata for the current web request, for the top level of the entry.
+     *
      * @return array<string, mixed>
      */
-    private function requestContext(): array
+    private function requestFields(): array
     {
         $app = Yii::$app ?? null;
         if ($app === null) {
@@ -300,27 +334,32 @@ class StandardJsonTarget extends FileTarget
             return [];
         }
 
-        $context = [];
+        $out = [];
 
-        $put = static function (string $key, callable $get) use (&$context): void {
+        $put = static function (string $key, callable $get) use (&$out): void {
             try {
                 $value = $get();
             } catch (Throwable) {
                 return;
             }
             if ($value !== null && $value !== '' && $value !== []) {
-                $context[$key] = $value;
+                $out[$key] = $value;
             }
         };
 
+        $put('client.ip', static fn () => $request->getUserIP());
         $put('http.request.method', static fn () => $request->getMethod());
-        $put('http.request.url', static fn () => $request->getUrl());
-        $put('http.request.query', static fn () => $request->getQueryParams());
-        $put('http.request.body', static fn () => $request->getBodyParams());
-        $put('http.user_agent', static fn () => $request->getUserAgent());
-        $put('http.referer', static fn () => $request->getReferrer());
+        $put('url.full', static fn () => $request->getAbsoluteUrl());
+        $put('url.path', static fn () => $request->getPathInfo());
+        $put('url.query', static fn () => $request->getQueryString());
+        $put('user_agent.original', static fn () => $request->getUserAgent());
+        $put('http.request.referrer', static fn () => $request->getReferrer());
 
-        return $context;
+        if ($this->includeRequestBody) {
+            $put('http.request.body.content', fn () => $this->mask($this->truncate($request->getBodyParams())));
+        }
+
+        return $out;
     }
 
     private function tryUnserializeArray(string $value): ?array

@@ -40,12 +40,13 @@ final class StandardJsonTargetTest extends TestCase
 
         self::assertSame('hello world', $entry['message']);
         self::assertSame('INFO', $entry['log.level']);
+        self::assertArrayHasKey('@timestamp', $entry);
         self::assertSame('wtis-tdj2', $entry['service.name']);
-        self::assertSame('app\\Foo::bar', $entry['error.kind']);
+        self::assertSame('app\\Foo::bar', $entry['log.logger']);
         self::assertSame(Tracker::id(), $entry['trace.id']);
-        self::assertNull($entry['user.id']);
-        self::assertNull($entry['account.id']);
-        self::assertNull($entry['http.request.ip']);
+        self::assertArrayNotHasKey('user.id', $entry);
+        self::assertArrayNotHasKey('account.id', $entry);
+        self::assertArrayNotHasKey('client.ip', $entry);
         self::assertArrayNotHasKey('error.stack_trace', $entry);
     }
 
@@ -124,10 +125,10 @@ final class StandardJsonTargetTest extends TestCase
 
         self::assertSame('boom', $entry['message']);
         self::assertSame('boom', $entry['error.message']);
-        self::assertSame('app', $entry['error.kind'], 'error.kind is always the category');
+        self::assertSame('app', $entry['log.logger'], 'log.logger is always the category');
         self::assertStringContainsString('RuntimeException', $entry['error.stack_trace']);
         self::assertStringContainsString('\n', json_encode($entry['error.stack_trace']));
-        self::assertSame(['/app/x.php:10'], $entry['context']['code.stacktrace']);
+        self::assertSame(['/app/x.php:10'], $entry['code.stacktrace']);
     }
 
     public function testErrorFieldsPromotedFromNestedKey(): void
@@ -150,7 +151,7 @@ final class StandardJsonTargetTest extends TestCase
         self::assertSame('Failed to do the thing', $entry['message']);
         self::assertSame('inner failure', $entry['error.message']);
         self::assertStringContainsString('RuntimeException', $entry['error.stack_trace']);
-        self::assertSame('common\\jobs\\DoThing::execute', $entry['error.kind'], 'error.kind = category');
+        self::assertSame('common\\jobs\\DoThing::execute', $entry['log.logger'], 'log.logger = category');
         self::assertSame(7, $entry['context']['user']);
         self::assertArrayNotHasKey('error', $entry['context']);
     }
@@ -179,7 +180,7 @@ final class StandardJsonTargetTest extends TestCase
         ]);
 
         self::assertSame('leaked object', $entry['error.message']);
-        self::assertSame('app\\X', $entry['error.kind'], 'error.kind stays the category');
+        self::assertSame('app\\X', $entry['log.logger'], 'log.logger stays the category');
         self::assertArrayNotHasKey('boom', $entry['context']);
     }
 
@@ -189,21 +190,24 @@ final class StandardJsonTargetTest extends TestCase
 
         self::assertArrayNotHasKey('error.message', $entry);
         self::assertArrayNotHasKey('error.stack_trace', $entry);
-        self::assertSame('app\\X', $entry['error.kind']);
+        self::assertSame('app\\X', $entry['log.logger']);
     }
 
-    public function testRequestContextAndMaskingUnderWebApp(): void
+    public function testRequestFieldsAndBodyMaskingAtTopLevel(): void
     {
+        $_SERVER['QUERY_STRING'] = 'q=x';
         $app = $this->mockWebApplication();
-        $app->getRequest()->setQueryParams(['q' => 'x']);
         $app->getRequest()->setBodyParams(['username' => 'joe', 'password' => 'hunter2']);
 
         $entry = $this->decode($this->target(), ['did a thing', Logger::LEVEL_INFO, 'app', 1757252712.5]);
 
-        self::assertSame('x', $entry['context']['http.request.query']['q']);
-        self::assertSame('joe', $entry['context']['http.request.body']['username']);
-        self::assertSame('***', $entry['context']['http.request.body']['password']);
-        self::assertArrayHasKey('http.request.method', $entry['context']);
+        self::assertSame('joe', $entry['http.request.body.content']['username']);
+        self::assertSame('***', $entry['http.request.body.content']['password']);
+        self::assertSame('GET', $entry['http.request.method']);
+        self::assertSame('q=x', $entry['url.query']);
+        self::assertArrayNotHasKey('http.request.method', $entry['context'] ?? []);
+
+        unset($_SERVER['QUERY_STRING']);
     }
 
     public function testRequestContextDisabled(): void
@@ -213,26 +217,59 @@ final class StandardJsonTargetTest extends TestCase
             'x', Logger::LEVEL_INFO, 'app', 1757252712.5,
         ]);
 
-        self::assertArrayNotHasKey('http.request.method', $entry['context']);
+        self::assertArrayNotHasKey('http.request.method', $entry);
+        self::assertArrayNotHasKey('http.request.body.content', $entry);
     }
 
-    public function testResolversAreUsed(): void
+    public function testRequestBodyCanBeDisabledSeparately(): void
     {
-        $entry = $this->decode($this->target([
-            'accountIdResolver' => static fn (): int => 42,
-            'userIdResolver' => static fn (): string => 'u-7',
-        ]), ['x', Logger::LEVEL_INFO, 'app', 1757252712.5]);
+        $app = $this->mockWebApplication();
+        $app->getRequest()->setBodyParams(['username' => 'joe']);
 
-        self::assertSame(42, $entry['account.id']);
-        self::assertSame('u-7', $entry['user.id']);
+        $entry = $this->decode($this->target(['includeRequestBody' => false]), [
+            'x', Logger::LEVEL_INFO, 'app', 1757252712.5,
+        ]);
+
+        self::assertArrayNotHasKey('http.request.body.content', $entry);
+        self::assertSame('GET', $entry['http.request.method'], 'the rest of the request block stays');
     }
 
-    public function testThrowingResolverIsSwallowed(): void
+    public function testUserResolverPopulatesUserFields(): void
     {
         $entry = $this->decode($this->target([
-            'userIdResolver' => static fn () => throw new RuntimeException('nope'),
+            'userResolver' => static fn (): array => [
+                'id' => 7,
+                'name' => 'jdoe',
+                'full_name' => 'Jane Doe',
+                'roles' => 'agent',
+            ],
         ]), ['x', Logger::LEVEL_INFO, 'app', 1757252712.5]);
 
-        self::assertNull($entry['user.id']);
+        self::assertSame(7, $entry['user.id']);
+        self::assertSame('jdoe', $entry['user.name']);
+        self::assertSame('Jane Doe', $entry['user.full_name']);
+        self::assertSame(['agent'], $entry['user.roles'], 'a scalar role is wrapped to a list');
+        self::assertArrayNotHasKey('account.id', $entry);
+    }
+
+    public function testUserResolverMissingKeysAreOmitted(): void
+    {
+        $entry = $this->decode($this->target([
+            'userResolver' => static fn (): array => ['id' => 'u-9'],
+        ]), ['x', Logger::LEVEL_INFO, 'app', 1757252712.5]);
+
+        self::assertSame('u-9', $entry['user.id']);
+        self::assertArrayNotHasKey('user.name', $entry);
+        self::assertArrayNotHasKey('user.full_name', $entry);
+        self::assertArrayNotHasKey('user.roles', $entry);
+    }
+
+    public function testThrowingUserResolverIsSwallowed(): void
+    {
+        $entry = $this->decode($this->target([
+            'userResolver' => static fn () => throw new RuntimeException('nope'),
+        ]), ['x', Logger::LEVEL_INFO, 'app', 1757252712.5]);
+
+        self::assertArrayNotHasKey('user.id', $entry);
     }
 }

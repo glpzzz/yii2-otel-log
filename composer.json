@@ -1,8 +1,8 @@
 {
     "name": "glpzzz/yii2-otel-log",
-    "description": "OpenTelemetry-aligned single-line JSON log target and request-trace propagation for Yii2",
+    "description": "ECS single-line JSON log target and request-trace propagation for Yii2",
     "type": "library",
-    "keywords": ["yii2", "log", "logging", "json", "opentelemetry", "otel", "observability", "tracing"],
+    "keywords": ["yii2", "log", "logging", "json", "ecs", "elastic-common-schema", "observability", "tracing"],
     "license": "MIT",
     "authors": [
         {
