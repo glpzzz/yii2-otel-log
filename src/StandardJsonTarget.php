@@ -347,7 +347,16 @@ class StandardJsonTarget extends FileTarget
             return $data::class . ': ' . $data->getMessage();
         }
 
-        if (is_object($data)) {
+        if ($data instanceof \__PHP_Incomplete_Class) {
+            // A legacy serialize([...]) payload is unpacked with allowed_classes=false
+            // (see tryUnserializeArray()), so every object in it arrives as an incomplete
+            // class. method_exists()/property_exists()/any method call *throw* on those,
+            // so it must be reduced here, before the generic is_object() branch below.
+            $vars = get_object_vars($data);
+            $class = $vars['__PHP_Incomplete_Class_Name'] ?? null;
+            unset($vars['__PHP_Incomplete_Class_Name']);
+            $data = ['__class' => is_string($class) ? $class : 'unknown'] + $vars;
+        } elseif (is_object($data)) {
             $data = method_exists($data, 'toArray') ? $data->toArray() : get_object_vars($data);
         }
 

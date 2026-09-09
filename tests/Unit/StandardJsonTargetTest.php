@@ -87,6 +87,34 @@ final class StandardJsonTargetTest extends TestCase
         self::assertSame('a@b.c', $entry['context']['to']);
     }
 
+    public function testSerializedPayloadWithObjectsDoesNotThrow(): void
+    {
+        // serialize([...]) is unpacked with allowed_classes=false, so any object in the
+        // payload comes back as __PHP_Incomplete_Class. Reducing one used to throw
+        // ("tried to call a method on an incomplete object"), which disabled the whole
+        // log target for the request.
+        $payload = serialize([
+            'message' => 'quote saved',
+            'data' => [
+                'id' => 5,
+                'assigned_at' => new \ArrayObject(['nested' => 'value']),
+                'created' => new \DateTimeImmutable('2026-09-09T00:00:00Z'),
+            ],
+        ]);
+
+        $entry = $this->decode($this->target(), [
+            $payload,
+            Logger::LEVEL_INFO,
+            'backend\\controllers\\NewFormController::createNewFormRevision',
+            1757252712.5,
+        ]);
+
+        self::assertSame('quote saved', $entry['message']);
+        self::assertSame(5, $entry['context']['data']['id']);
+        self::assertSame('ArrayObject', $entry['context']['data']['assigned_at']['__class']);
+        self::assertSame('DateTimeImmutable', $entry['context']['data']['created']['__class']);
+    }
+
     public function testThrowablePayload(): void
     {
         $exception = new RuntimeException('boom');
